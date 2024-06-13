@@ -1,0 +1,71 @@
+# Byte-compiled / optimized / dependency libraries
+*.class
+*.jar
+*.war
+*.ear
+*.dll
+*.exe
+*.o
+*.pyc
+*.pyo
+*.so
+
+# Scala build and project files
+target/
+lib_managed/
+src_managed/
+.ensime_cache/
+.ensime
+
+# SBT specific files
+project/target/
+project/project/
+.history
+
+# IDEA specific files
+*.iml
+.idea/
+*.iws
+*.ipr
+out/
+**/.metals/*
+**/.bloop/*
+# Eclipse specific files
+.metadata
+.classpath
+.project
+.settings/
+.apt_generated/
+.apt_generated_test/
+
+# VS Code specific files
+.vscode/
+
+# Mac specific files
+.DS_Store
+
+# Logs and temp files
+*.log
+*.tmp
+tmp/
+logs/
+log/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor swap files
+*~
+*.swp
+*.swo
+*.bak
+*.orig
+*.tmp
+
+# Other files to ignore
+!**/src/main/**/assets/**/*
+!**/src/test/**/resources/**/*
+!**/src/test/**/data/**/*
