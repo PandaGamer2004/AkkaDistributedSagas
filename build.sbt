@@ -6,7 +6,8 @@ lazy val coreDependencies = Seq(
   "com.typesafe.akka" %% "akka-actor-typed" % akkaVersion,
   "ch.qos.logback" % "logback-classic" % "1.2.13",
   "com.typesafe.akka" %% "akka-actor-testkit-typed" % akkaVersion % Test,
-  "org.scalatest" %% "scalatest" % "3.2.15" % Test
+  "org.scalatest" %% "scalatest" % "3.2.15" % Test,
+  "org.scalameta" %% "munit" % "0.7.29" % Test
 )
 
 lazy val printGitIgnore = taskKey[Unit]("A simple hello task")
