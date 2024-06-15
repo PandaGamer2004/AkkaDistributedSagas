@@ -31,6 +31,7 @@ import com.transactor.protocols.SagaStepContract.SagaStepExecutionResult
 import scala.util.Success
 import scala.util.Failure
 import com.transactor.configuration.conversions.ConfigurationConversions
+import com.transactor.composition.ModuleRegistrator.registerToActorSystem
 
 
 
@@ -164,9 +165,19 @@ object SagaStepContract {
 
 
 
-class SagaRegistration[TInitial, TStepPayload]() extends 
+
+
+class SagaRegistration[TInitial, TStepPayload] extends 
      ResettableRegistration[TInitial, TStepPayload],
      PivotalRegistration[TInitial, TStepPayload]{
+
+
+
+    case class StartInteractionExtrnal[TStepResult <: Matchable](
+        sagaId: UUID,
+        spinuip: TStepPayload,
+        notifyResult: ActorRef[Option[TStepResult]]
+    )
 
 
     case object StepFailed{}
@@ -236,45 +247,54 @@ class SagaRegistration[TInitial, TStepPayload]() extends
 
 
 
+    private def registerRessetableInternal[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure, 
+        TStepKey <: StepKeyBase
+    ](step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey]): SagaRegistration[TInitial, TStepResult] = {
+            val startupBehaviour = createMdcForInteraction(step.descriptor){
+                //Seting up behaviour that will be responssilbe for receiving mesage
+                Behaviors.receive[StartInteraction[TStepResult, TStepKey]]{
+                    (ctx, message) => {
+                    message match {
+                            case StartInteraction[TStepResult, TStepKey](sagaId, interactionPayload, notifyResult) => {
+                                val interactionHandlerName
+                                    = makeGenerticStepActorName("StepInteractionHandler")(sagaId, step.descriptor) 
+
+                                val interactionHandler
+                                    = ctx.spawn(
+                                        interacationCoordinator(
+                                            step, 
+                                            sagaId, 
+                                            notifyResult, 
+                                            interactionPayload
+                                        ),
+                                        interactionHandlerName
+                                    )
+
+                                Behaviors.same
+                            }
+
+                        
+                    }
+                    
+                    }
+                }
+            }
+
+            throw new Exception("Error")
+        }
+
+
     override def registerRessetable[
         TStepResult <: Matchable, 
         TErrorResult <: SagaStepFailure, 
         TStepKey <: StepKeyBase
     ](
         step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey]
-    ): ResettableRegistration[TInitial, TStepResult] = {
-        createMdcForInteraction(step.descriptor){
-            //Seting up behaviour that will be responssilbe for receiving mesage
-            Behaviors.receive[StartInteraction[TStepResult, TStepKey]]{
-                (ctx, message) => {
-                   message match {
-                        case StartInteraction[TStepResult, TStepKey](sagaId, interactionPayload, notifyResult) => {
-                            val interactionHandlerName
-                                = makeGenerticStepActorName("StepInteractionHandler")(sagaId, step.descriptor) 
+    ): ResettableRegistration[TInitial, TStepResult]
+         = this.registerRessetableInternal(step)
 
-                            val interactionHandler
-                                = ctx.spawn(
-                                    interacationCoordinator(
-                                        step, 
-                                        sagaId, 
-                                        notifyResult, 
-                                        interactionPayload
-                                    ),
-                                    interactionHandlerName
-                                )
-
-                            Behaviors.same
-                        }
-
-                    
-                   }
-                
-                }
-            }
-        }
-        
-        throw new NotImplementedError()
-    }
 
 
 
@@ -331,6 +351,10 @@ class SagaRegistration[TInitial, TStepPayload]() extends
 
                         case InteractionFailed[TStepResult, TErrorResult, TStepKey](errorResult, sagaId, notifyResult) => {
 
+                            // if(Behavior.isUnhandled(step.compensation)){
+                            //     //Means we could skip compensation stege because data
+                            //     //That is supplied by compenstaion shouldn't be used
+                            // }
                             //Todo implement compensations logic
                             // val compenastionActor = context.spawn(
                             //     step.compensation,
@@ -375,12 +399,30 @@ class SagaRegistration[TInitial, TStepPayload]() extends
 
     override def registerRunToCompletion[TStepResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase](
         step: StepData[TStepPayload, TStepResult, TErrorResult, TStepKey]
-    ): PivotalRegistration[TInitial, TStepResult];
+    ): PivotalRegistration[TInitial, TStepResult] = {
+        //Basically adapter pattern, it will unstruct that compensation is basically unhnalded 
+        val adaptedSagaStep = new StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey]{
+            def compensation: Behavior[CompensationRequest[TStepPayload, TErrorResult, TStepKey]]
+                 = Behaviors.unhandled
+            def descriptor: StepDescriptor[TStepKey] 
+                = step.descriptor
+
+            def initialize: Behavior[PerformSagaStep[TStepPayload, TStepResult, TErrorResult]]
+                = step.initialize
+
+            def notifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]] 
+                = step.notifyError
+        }
+
+        this.registerRessetableInternal(adaptedSagaStep)
+    }
 
 
     override def registerPivotal[TStepResult <: Matchable, TErrorResult2 <: SagaStepFailure, TStepKey <: StepKeyBase](
         step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult2, TStepKey]
-    ): PivotalRegistration[TInitial, TStepResult] = ???
+    ): PivotalRegistration[TInitial, TStepResult] = 
+        this.registerRessetableInternal(step)
+    
 
 
 
