@@ -325,7 +325,7 @@ class SagaRegistration[TInitial, TStepPayload]() extends
                                                         descriptor = step.descriptor
                                                     )
                             notifyResult ! Left(sucessStepResult)
-                                        //Stop interaction when completed
+                            //Stop interaction when completed
                             Behaviors.stopped
                         }
 
@@ -343,7 +343,6 @@ class SagaRegistration[TInitial, TStepPayload]() extends
                             )
 
                             notifyResult ! Right(failedStepResult)  
-                            
                             Behaviors.stopped
                         }
                         case _ => throw new Exception()
