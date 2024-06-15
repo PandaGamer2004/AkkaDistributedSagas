@@ -18,28 +18,24 @@ import akka.actor.ProviderSelection.Custom
 import com.transactor.protocols.CompesationContract.CompensationRequest
 import akka.Done
 import scala.annotation.tailrec
+import com.transactor.protocols.SagaSteps.sagaStepWithCompensation
+import com.transactor.protocols.SagaSteps.sagaStep
+import akka.NotUsed
+import scala.concurrent.java8.FuturesConvertersImpl.P
+import upickle.default
+import scala.language.implicitConversions
+import scala.util.Try
+import com.transactor.serialization.{SerDe, SerializedJson}
+import com.transactor.protocols.SagaStepContract.SagaStepExecutionResult
+import scala.util.Success
+import scala.util.Failure
 
 
 
 
 
-object SagaStepContract{
-    sealed trait Request
-    sealed trait Response
-
-    // Base class for performing a saga step
-    case class PerformSagaStep[TInitializePayload, TErrorResult <: Matchable, TSucessResult](
-        sagaStep: TInitializePayload,
-        executionDeadline: FiniteDuration
-    ) extends Request
-
-
-    case class SagaSucceeded[TResultPayload](successPayload: TResultPayload) extends Response
-
-    case class SagaStepFailed[TFailureResponse](failurePayload: TFailureResponse) extends Response
-    
-    case object SagaStepDeadlineExceeded
-}
+type StepKeyBase = String & Singleton
+case class StepDescriptor[+TStepKey <: StepKeyBase](stepName: TStepKey)
 
 
 
@@ -48,26 +44,9 @@ case class ErrorNotification[TKey <: StepKeyBase, TError](
     error: TError
  )
 
-
-case class SagaPipelineError[TError](stepKey: String, error: TError)
-trait SagaPipeline[TInputType, TResultType, TErrorType]{
-    def execute(
-        input: TInputType,
-        notifyError: Behavior[TErrorType], 
-        notifyCompletion: Behavior[TResultType]
-    ): Unit
-}
-
-
-
-
-type StepKeyBase = String & Singleton
-
-case class StepDescriptor[TStepKey <: StepKeyBase](stepName: TStepKey)
-
-
-trait StepData[TStepPayload, TSuccessResult <: Matchable, TErrorResult, TStepKey <: StepKeyBase]{
+trait StepData[TStepPayload, TSuccessResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase]{
     def initialize: Behavior[SagaStepContract.PerformSagaStep[TStepPayload, TSuccessResult, TErrorResult]]
+    def notifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]]
     def descriptor: StepDescriptor[TStepKey]
 }
 
@@ -88,28 +67,36 @@ object CompesationContract{
 
 
 
-trait StepDataWithCompensation[TStepPayload, TSuccessResult <: Matchable, TErrorResult, TStepKey <: StepKeyBase] 
+trait StepDataWithCompensation[TStepPayload, TSuccessResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase] 
     extends StepData[TStepPayload, TSuccessResult, TErrorResult, TStepKey] 
 {
     def compensation: Behavior[CompesationContract.CompensationRequest[TStepPayload, TErrorResult, TStepKey]]
 }
 
+
 object SagaSteps{
-    def sagaStep[TStepPayload, TSuccessResult <: Matchable, TErrorResult, TStepKey <: StepKeyBase](
+    def sagaStep[TStepPayload, TSuccessResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase](
         stepInitialize: Behavior[PerformSagaStep[TStepPayload, TSuccessResult, TErrorResult]],
-        stepDescriptor: StepDescriptor[TStepKey]
+        stepDescriptor: StepDescriptor[TStepKey],
+        stepNotifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]] 
     ): StepData[TStepPayload, TSuccessResult, TErrorResult, TStepKey] = new:
         def initialize = stepInitialize
         def descriptor: StepDescriptor[TStepKey] = stepDescriptor
 
-    def sagaStepWithCompensation[TStepPayload, TSuccessResult <: Matchable, TErrorResult, TStepKey <: StepKeyBase](
+        def notifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]] = stepNotifyError
+
+
+    def sagaStepWithCompensation[TStepPayload, TSuccessResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase](
         stepInitialize: Behavior[PerformSagaStep[TStepPayload, TSuccessResult, TErrorResult]],
         stepDescriptor: StepDescriptor[TStepKey],
-        stepCompensation: Behavior[CompensationRequest[TStepPayload, TErrorResult, TStepKey]]
+        stepCompensation: Behavior[CompensationRequest[TStepPayload, TErrorResult, TStepKey]],
+        stepNotifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]] 
     ): StepDataWithCompensation[TStepPayload, TSuccessResult, TErrorResult, TStepKey] = new:
         def initialize = stepInitialize
         def descriptor = stepDescriptor
         def compensation = stepCompensation
+    
+        def notifyError: ActorRef[ErrorDescription[TStepKey, TErrorResult]] = stepNotifyError
 }
 
 
@@ -122,7 +109,6 @@ case class ErrorDescription[TStepKey <: StepKeyBase, TErrorResult <: SagaStepFai
 )
 
 
-
 //Because we are glui
 type CombineError[TCombinator, TError <: SagaStepFailure, TStepKey <: StepKeyBase] 
     = ErrorDescription[TStepKey, TError] | TCombinator
@@ -130,30 +116,301 @@ type CombineError[TCombinator, TError <: SagaStepFailure, TStepKey <: StepKeyBas
 
 
 
-trait ResettableRegistration[TInitial, TStepPayload, TErrorResult] {
+trait ResettableRegistration[TInitial, TStepPayload] {
     def registerRessetable[TStepResult <: Matchable, TErrorResult2 <: SagaStepFailure, TStepKey <: StepKeyBase](
         step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult2, TStepKey],
-    ): ResettableRegistration[TInitial, TStepResult, CombineError[TErrorResult, TErrorResult2, TStepKey]]
+    ): ResettableRegistration[TInitial, TStepResult]
 
     def registerPivotal[TStepResult <: Matchable, TErrorResult2 <: SagaStepFailure, TStepKey <: StepKeyBase](
         step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult2, TStepKey],
-    ): PivotalRegistration[TInitial, TStepResult, CombineError[TErrorResult, TErrorResult2, TStepKey]]
+    ): PivotalRegistration[TInitial, TStepResult]
 }
 
 
-trait PivotalRegistration[TInitial, TStepPayload, TErrorResult] {
+trait PivotalRegistration[TInitial, TStepPayload] {
     //Register error but don't infer type for it, as of now use only for logging
-    def registerRunToCompletion[TStepResult <: Matchable, TErrorResult2, TStepKey <: StepKeyBase](
-        step: StepData[TStepPayload, TStepResult, TErrorResult2, TStepKey]
-    ): PivotalRegistration[TInitial, TStepResult, TErrorResult]
+    def registerRunToCompletion[TStepResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase](
+        step: StepData[TStepPayload, TStepResult, TErrorResult, TStepKey]
+    ): PivotalRegistration[TInitial, TStepResult]
 
-    def compile(): SagaPipeline[TInitial, TStepPayload, TErrorResult]
+    def compile(context: ActorContext[?]): SagaPipeline[TInitial, TStepPayload]
 }
 
 
-object SagaRoot {
-    def makeRegistration[TInitial]()
-            : ResettableRegistration[TInitial, TInitial, Nothing] = ???
+
+
+
+trait SagaPipeline[TInputType, TResultType]{
+    def execute(
+        input: TInputType,
+        notifyCompletion: ActorRef[TResultType]
+    ): ActorRef[Nothing]
+}
+
+
+object SagaStepContract {
+
+    type SagaStepExecutionResult[TSuccessPayload, TErrorResult <: Matchable]
+         = Either[TSuccessPayload, TErrorResult]
+
+    
+    // Base class for performing a saga step
+    case class PerformSagaStep[TInitializePayload, TSucessResult, TErrorResult <: Matchable](
+        stepPayload: TInitializePayload,
+        exeuctionDeadline: FiniteDuration,
+        notifyResult: ActorRef[SagaStepExecutionResult[TSucessResult, TErrorResult]]
+    )
+}
+
+
+
+class SagaRegistration[TInitial, TStepPayload]() extends 
+     ResettableRegistration[TInitial, TStepPayload],
+     PivotalRegistration[TInitial, TStepPayload]{
+
+
+    case object StepFailed{}
+
+    case class StepResult[TPayload, TStepKey <: StepKeyBase](
+        payload: TPayload,
+        descriptor: StepDescriptor[TStepKey]
+    )
+
+
+    //Registered steps keys here 
+    type NotifyStepInteractionResult[TStepResult, TStepKey <: StepKeyBase] 
+        = Either[StepResult[TStepResult, TStepKey], StepResult[StepFailed.type, TStepKey]]
+
+
+
+    
+    
+
+    private case class StartInteraction[TStepResult <: Matchable, TStepKey <: StepKeyBase](
+        sagaId: UUID,
+        interactionPaylod: TStepPayload,
+        notifyResult: ActorRef[NotifyStepInteractionResult[TStepResult, TStepKey]]
+    )
+
+
+
+    sealed trait InteractionInternalContract[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure,
+        TStepKey <: StepKeyBase
+    ] 
+
+
+    private case class CompensationFinished[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure, 
+        TStepKey <: StepKeyBase
+    ](
+        sagaId: UUID,
+        sagaErrorResult: TErrorResult,
+        notifyResult: ActorRef[NotifyStepInteractionResult[TStepResult, TStepKey]]
+        
+    ) extends InteractionInternalContract[TStepResult, TErrorResult, TStepKey]
+
+
+
+    private case class InteractionCompleted[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure, 
+        TStepKey <: StepKeyBase
+    ](
+        successResult: TStepResult,
+        sagaId: UUID,
+        notifyResult: ActorRef[NotifyStepInteractionResult[TStepResult, TStepKey]]
+    ) extends InteractionInternalContract[TStepResult, TErrorResult, TStepKey]
+
+    private case class InteractionFailed[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure, 
+        TStepKey <: StepKeyBase
+    ](
+        errorResult: TErrorResult,
+        sagaId: UUID,
+        notifyResult: ActorRef[NotifyStepInteractionResult[TStepResult, TStepKey]]
+    ) extends InteractionInternalContract[TStepResult, TErrorResult, TStepKey]
+
+
+    private val SagaStepExecutionDeadline = 10.seconds
+
+    override def registerRessetable[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure, 
+        TStepKey <: StepKeyBase
+    ](
+        step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey]
+    ): ResettableRegistration[TInitial, TStepResult] = {
+                
+        createMdcForInteraction(step.descriptor){
+            //Seting up behaviour that will be responssilbe for receiving mesage
+            Behaviors.receive[StartInteraction[TStepResult, TStepKey]]{
+                (ctx, message) => {
+                   message match {
+                        case StartInteraction[TStepResult, TStepKey](sagaId, interactionPayload, notifyResult) => {
+                            val stepExecutorName = makeGenerticStepActorName("StepExecutor")(sagaId, step.descriptor)
+                            
+                            val spawnedInteractionActor 
+                                = ctx.spawn(step.initialize, stepExecutorName)
+
+                            val interactionHandlerName
+                                = makeGenerticStepActorName("StepInteractionHandler")(sagaId, step.descriptor) 
+
+                            val interactionHandler
+                                = ctx.spawn(
+                                    interacationCoordinator(
+                                        step, 
+                                        sagaId, 
+                                        notifyResult, 
+                                        interactionPayload
+                                    ),
+                                    interactionHandlerName
+                                )
+
+                            
+
+                            Behaviors.same
+                        }
+
+                    
+                   }
+                
+                }
+            }
+        }
+        
+        throw new NotImplementedError()
+    }
+
+    private def interacationCoordinator[
+        TStepResult <: Matchable, 
+        TErrorResult <: SagaStepFailure,
+        TStepKey <: StepKeyBase
+    ](
+        step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey],
+        sagaId: UUID,
+        notifyResult: ActorRef[NotifyStepInteractionResult[TStepResult, TStepKey]],
+        interactionPayload: TStepPayload
+    ): Behavior[InteractionInternalContract[TStepResult, TErrorResult, TStepKey]]
+        = Behaviors.setup[InteractionInternalContract[TStepResult, TErrorResult, TStepKey]]{
+            context => {
+                
+                val pipedInteraction = context.messageAdapter[SagaStepExecutionResult[TStepResult, TErrorResult]](
+                    sagaExecutionResult => sagaExecutionResult match {
+                        case Left(result) => InteractionCompleted(result, sagaId, notifyResult)
+                        case Right(error) => InteractionFailed(error, sagaId, notifyResult)
+                    }
+                )
+                val sagaStepExeuctionMessage = PerformSagaStep[TStepPayload, TStepResult, TErrorResult](
+                                exeuctionDeadline = SagaStepExecutionDeadline,
+                                notifyResult = pipedInteraction,
+                                stepPayload = interactionPayload
+                            )
+
+
+                Behaviors.receiveMessage[InteractionInternalContract[TStepResult, TErrorResult, TStepKey]](
+                    (message) => message match {
+                        case InteractionCompleted[TStepResult, TErrorResult, TStepKey](successResult, sagaId, notifyResult) => {
+                            //Notify that interaction completed successfully on stop interaction
+                            val sucessStepResult = StepResult[TStepResult, TStepKey](
+                                                        payload = successResult,
+                                                        descriptor = step.descriptor
+                                                    )
+                            notifyResult ! Left(sucessStepResult)
+                                        //Stop interaction when completed
+                            Behaviors.stopped
+                        }
+
+                        case InteractionFailed[TStepResult, TErrorResult, TStepKey](errorResult, sagaId, notifyResult) => {
+                            val errorNotifacationResult = StepResult(
+                                StepFailed,
+                                descriptor = step.descriptor
+                            )
+                                        
+                            val compenastionActor = context.spawn(
+                                step.compensation,
+                                makeGenerticStepActorName("StepCompensation")(sagaId, step.descriptor)
+                            )
+                                            
+                            Behaviors.same
+                        }
+                        case CompensationFinished[TStepResult, TErrorResult, TStepKey](_, _, _) => ???
+                    }
+                )
+            }
+        }
+            
+        
+
+
+    
+    private def makeGenerticStepActorName[TStepKey <: StepKeyBase](stepType: String)(sagaId: UUID, descriptor: StepDescriptor[TStepKey])
+        = s"${stepType}_${sagaId}-${descriptor.stepName}"
+
+    private def createMdcForInteraction[TKey <: StepKeyBase, TStepResult <: Matchable](step: StepDescriptor[TKey]) = {
+        Behaviors.withMdc[StartInteraction[TStepResult, TKey]](
+            Map("Step key" -> step.stepName),
+            interaction => Map("SagaId" -> interaction.sagaId.toString)
+        )
+    }
+
+
+
+    
+
+    override def registerRunToCompletion[TStepResult <: Matchable, TErrorResult <: SagaStepFailure, TStepKey <: StepKeyBase](
+        step: StepData[TStepPayload, TStepResult, TErrorResult, TStepKey]
+    ): PivotalRegistration[TInitial, TStepResult] = ???
+
+
+    override def registerPivotal[TStepResult <: Matchable, TErrorResult2 <: SagaStepFailure, TStepKey <: StepKeyBase](
+        step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult2, TStepKey]
+    ): PivotalRegistration[TInitial, TStepResult] = ???
+
+
+
+
+    sealed trait CoordinatorContract
+    
+    sealed trait CoordinatorRequest extends CoordinatorContract
+    sealed trait CoordinatorResponse extends CoordinatorContract
+
+    case class RegisterNotifications(
+        notifyCompleted: ActorRef[TStepPayload],
+    ) extends CoordinatorContract
+
+
+    override def compile(context: ActorContext[?]): SagaPipeline[TInitial, TStepPayload] = new:
+        override def execute(
+            input: TInitial, 
+            notifyCompletion: ActorRef[TStepPayload]
+        ): ActorRef[Nothing] = {
+
+            val sagaId = UUID.randomUUID();
+            val tranactionCoordinatorRef 
+                = context.spawn(
+                    makeTransactionCoordinator(sagaId),
+                    s"TransactionCoordinator${sagaId}"
+                )
+
+            tranactionCoordinatorRef ! RegisterNotifications(
+                notifyCompletion,
+            )
+
+            tranactionCoordinatorRef
+
+        }
+
+    def makeTransactionCoordinator[TInitial](withId: UUID): Behavior[CoordinatorContract] = ???
+        
+}
+
+object SagaRoot {    
+    def makeRegistration[TInitial](): ResettableRegistration[TInitial, TInitial] = 
+        new SagaRegistration[TInitial, TInitial]()
 
 }
 
@@ -170,61 +427,83 @@ case class Step3Result(result3: String)
 case class CustomError(message: String) extends SagaStepFailure
 
 case class WrappedThrowable[TException <: Throwable](ex: TException) extends SagaStepFailure
-@main def main = {
-    import SagaSteps._
-    
-    val FirstStepDescriptor = StepDescriptor("First step")
-    val SecondStepDescriptor = StepDescriptor("Second step")
 
-    val compiledSaga = 
-        SagaRoot
-        .makeRegistration()
-        .registerRessetable(
-            sagaStepWithCompensation(
-                stepInitialize = Behaviors.receive[PerformSagaStep[String, Step1Result,WrappedThrowable[Throwable]]]{
-                    (ctx, message) => Behaviors.same
-                },
-                stepDescriptor = FirstStepDescriptor,
-                stepCompensation = Behaviors.unhandled
-            )
-        )
-         .registerPivotal(
-            sagaStepWithCompensation(
-                stepInitialize = Behaviors.receive[PerformSagaStep[Step1Result, Step2Result, CustomError]]{
-                    (ctx, message) => Behaviors.same
-                },
-                stepDescriptor = SecondStepDescriptor,
-                stepCompensation = Behaviors.unhandled
-            )
-        )
-        .registerRunToCompletion(
-            sagaStep(
-                stepInitialize = Behaviors.receive[PerformSagaStep[Step2Result, Done, CustomError]]{
-                    (ctx, message) => Behaviors.same 
-                },
-                stepDescriptor = StepDescriptor("Last step")
-            )
-        ).compile()
 
-    compiledSaga.execute(
-        input = "Sample input",
-        notifyCompletion = Behaviors.receive {
-            (ctx, messsag) => Behaviors.same
-        },
-        notifyError = Behaviors.receiveMessage{
-            message => {
-                
-                val res = message match {
-                    case (ErrorDescription(FirstStepDescriptor, err@WrappedThrowable(ex))) => {
-                        //Handle first error
-                    }
-                    case (ErrorDescription(SecondStepDescriptor, err@CustomError )) => {
-                        //Handle second error
-                    }
-                }
-                Behaviors.same
-            }
+
+case class StartProgram()
+
+object SagaCompositionRoot{
+    def apply(): Behavior[StartProgram] = Behaviors.receive{
+        (context, msg) => {
+            val FirstStepDescriptor = StepDescriptor("First step")
+            val SecondStepDescriptor = StepDescriptor("Second step")
+            val compiledSaga = SagaRoot
+                    .makeRegistration()
+                    .registerRessetable(
+                        sagaStepWithCompensation(
+                            stepInitialize = Behaviors.receive[PerformSagaStep[String, Step1Result, WrappedThrowable[Throwable]]]{
+                                (ctx, message) => {
+                                    //Perform saga step and stop integration actor
+                                    message.notifyResult ! Left(Step1Result("Step 1 is completed"))
+                                    Behaviors.stopped
+                                }
+                            },
+                            stepDescriptor = FirstStepDescriptor,
+                            stepCompensation = Behaviors.unhandled,
+                            stepNotifyError = context.spawnAnonymous(Behaviors.receive{
+                                (context, message) => {
+                                    Behaviors.same
+                                }
+                            })
+                        )
+                    )
+                    .registerPivotal(
+                        sagaStepWithCompensation(
+                            stepInitialize = Behaviors.receive[PerformSagaStep[Step1Result, Step2Result, CustomError]]{
+                                (ctx, message) => Behaviors.same
+                            },
+                            stepDescriptor = SecondStepDescriptor,
+                            stepCompensation = Behaviors.unhandled,
+                            stepNotifyError = context.spawnAnonymous(Behaviors.receive{
+                                (context, message) => Behaviors.same
+                            })
+                        )
+                    )
+                    .registerRunToCompletion(
+                        sagaStep(
+                            stepInitialize = Behaviors.receive[PerformSagaStep[Step2Result, Done, CustomError]]{
+                                (ctx, message) => Behaviors.same 
+                            },
+                            stepDescriptor = StepDescriptor("Last step"),
+                            //If we want to ingnore run to completion step just simply pass ignore step
+                            stepNotifyError = context.system.ignoreRef
+                        )
+                    )
+                    .compile(context)
+
+            
+            compiledSaga.execute(
+                    input = "Sample input",
+                    notifyCompletion = context.spawnAnonymous(Behaviors.receive {
+                        (ctx, messsag) => Behaviors.same
+                    })
+                )
+
+            Behaviors.same   
         }
+    }
+
+}
+
+
+@main def main = {
+    val bootstrapActorSystem = ActorSystem(
+        SagaCompositionRoot(), 
+        "TestActorSystem"
     )
+
+    bootstrapActorSystem ! StartProgram()
+
+    bootstrapActorSystem.wait()
 }
 
