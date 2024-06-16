@@ -165,20 +165,19 @@ object SagaStepContract {
 
 
 
-
-
-class SagaRegistration[TInitial, TStepPayload] extends 
-     ResettableRegistration[TInitial, TStepPayload],
-     PivotalRegistration[TInitial, TStepPayload]{
-
-
-
-    case class StartInteractionExtrnal[TStepResult <: Matchable](
+case class StartInteractionExtrnal[TInitial, TStepPayload <: Matchable](
         sagaId: UUID,
-        spinuip: TStepPayload,
-        notifyResult: ActorRef[Option[TStepResult]]
-    )
+        spinuip: TInitial,
+        notifyResult: ActorRef[Option[TStepPayload]]
+)
 
+class SagaRegistration[TInitial, TStepPayload <: Matchable]
+(  
+    val mergedBehaviour: Option[Behavior[StartInteractionExtrnal[TInitial, TStepPayload]]]
+)extends 
+     ResettableRegistration[TInitial, TStepPayload],
+     PivotalRegistration[TInitial, TStepPayload]
+{
 
     case object StepFailed{}
 
@@ -193,8 +192,6 @@ class SagaRegistration[TInitial, TStepPayload] extends
         = Either[StepResult[TStepResult, TStepKey], StepResult[StepFailed.type, TStepKey]]
 
 
-
-    
     
 
     private case class StartInteraction[TStepResult <: Matchable, TStepKey <: StepKeyBase](
@@ -252,37 +249,132 @@ class SagaRegistration[TInitial, TStepPayload] extends
         TErrorResult <: SagaStepFailure, 
         TStepKey <: StepKeyBase
     ](step: StepDataWithCompensation[TStepPayload, TStepResult, TErrorResult, TStepKey]): SagaRegistration[TInitial, TStepResult] = {
-            val startupBehaviour = createMdcForInteraction(step.descriptor){
+
+
+        val startupBehaviour = createMdcForInteraction(step.descriptor){
                 //Seting up behaviour that will be responssilbe for receiving mesage
                 Behaviors.receive[StartInteraction[TStepResult, TStepKey]]{
                     (ctx, message) => {
-                    message match {
-                            case StartInteraction[TStepResult, TStepKey](sagaId, interactionPayload, notifyResult) => {
-                                val interactionHandlerName
-                                    = makeGenerticStepActorName("StepInteractionHandler")(sagaId, step.descriptor) 
+                        message match {
+                                case StartInteraction[TStepResult, TStepKey](sagaId, interactionPayload, notifyResult) => {
+                                    val interactionHandlerName
+                                        = makeGenerticStepActorName("StepInteractionHandler")(sagaId, step.descriptor) 
 
-                                val interactionHandler
-                                    = ctx.spawn(
-                                        interacationCoordinator(
-                                            step, 
-                                            sagaId, 
-                                            notifyResult, 
-                                            interactionPayload
-                                        ),
-                                        interactionHandlerName
-                                    )
+                                    val interactionHandler
+                                        = ctx.spawn(
+                                            interacationCoordinator(
+                                                step, 
+                                                sagaId, 
+                                                notifyResult, 
+                                                interactionPayload
+                                            ),
+                                            interactionHandlerName
+                                        )
 
-                                Behaviors.same
-                            }
-
-                        
+                                    Behaviors.same
+                                }                            
+                        }   
                     }
+                }
+        }
+
+
+        this.mergedBehaviour match {
+            //On first iteration we always have TInitial = TStepPayload, so here we are
+            //Will perform runtime casting
+            case None => Behaviors.receive[StartInteractionExtrnal[TInitial, TStepResult]]{
+                (context, externalStartupMessage) => {
+                    val spawnedLocalOperationContract = context.spawnAnonymous(startupBehaviour)
                     
-                    }
+                    val errorMessageAdapterBehaviour 
+                            = makeStepInteractionResultTranslator[TStepResult, TStepKey](
+                                externalStartupMessage.notifyResult
+                            )
+
+
+                    val errorMessageAdapterActor = context.spawnAnonymous(errorMessageAdapterBehaviour)
+                    
+                    spawnedLocalOperationContract ! StartInteraction[TStepResult, TStepKey](
+                        sagaId = externalStartupMessage.sagaId,
+                        interactionPaylod = externalStartupMessage.spinuip.asInstanceOf[TStepPayload],
+                        notifyResult = errorMessageAdapterActor
+                    )
+
+                    Behaviors.ignore
                 }
             }
 
-            throw new Exception("Error")
+            case Some(nestedMessageHandler) => Behaviors.receive[StartInteractionExtrnal[TInitial, TStepPayload]]{
+                (context, externalInteractionStartEvent) => {
+                    val startInteractionExternalRef = context.spawnAnonymous(nestedMessageHandler)
+
+                    val previousStepInteractionResult = 
+                        context.spawnAnonymous(
+                            Behaviors.receive[Option[TStepPayload]]{
+                                (context, message) => {
+                                    message match {
+                                        case None => {
+                                            //Just propagate faiure
+                                            externalInteractionStartEvent.notifyResult ! None
+                                            Behaviors.stopped
+                                        }
+                                        case Some(value) => {
+                                                
+
+                                            val stepBehaviour = context.spawnAnonymous(startupBehaviour)
+                                            val stepInteractionResultTranslator
+                                                = makeStepInteractionResultTranslator[TStepPayload, TStepKey](
+                                                    externalInteractionStartEvent.notifyResult
+                                                )
+                                            
+                                            
+                                            stepBehaviour ! StartInteraction[TStepResult, TStepKey](
+                                                sagaId = externalInteractionStartEvent.sagaId,
+                                                interactionPaylod = value,
+                                                notifyResult = null                                                
+                                            )
+
+
+                                            Behaviors.stopped
+                                        }
+                                    }
+                                }
+                            }
+                        )
+
+                    
+                    startInteractionExternalRef ! StartInteractionExtrnal[TInitial, TStepPayload](
+                        externalInteractionStartEvent.sagaId,
+                        externalInteractionStartEvent.spinuip,
+                        previousStepInteractionResult
+                    )
+
+                    Behaviors.ignore
+                }
+            }
+    
+        }
+
+        throw new Exception("Error")
+    }
+    
+
+    private def makeStepInteractionResultTranslator[TStepResult <: Matchable, TStepKey <: StepKeyBase](
+        externalMessageNotificator: ActorRef[Option[TStepResult]]
+    ): Behavior[NotifyStepInteractionResult[TStepResult, TStepKey]]
+        = Behaviors.receiveMessage[NotifyStepInteractionResult[TStepResult, TStepKey]]{
+            message => {
+                message match {
+                    case Left(value) => {
+                        externalMessageNotificator ! Some(value.payload)
+                        Behaviors.stopped
+                    }
+                    case Right(value) => {
+                        externalMessageNotificator ! None
+                        Behaviors.stopped
+                    }
+                }
+            }
         }
 
 
@@ -296,9 +388,6 @@ class SagaRegistration[TInitial, TStepPayload] extends
          = this.registerRessetableInternal(step)
 
 
-
-
-    private val MaxCompensationRetries = 8;
 
     private def interacationCoordinator[
         TStepResult <: Matchable, 
@@ -355,7 +444,7 @@ class SagaRegistration[TInitial, TStepPayload] extends
                             //     //Means we could skip compensation stege because data
                             //     //That is supplied by compenstaion shouldn't be used
                             // }
-                            //Todo implement compensations logic
+                            // Todo implement compensations logic
                             // val compenastionActor = context.spawn(
                             //     step.compensation,
                             //     makeGenerticStepActorName("StepCompensation")(sagaId, step.descriptor)
@@ -414,7 +503,7 @@ class SagaRegistration[TInitial, TStepPayload] extends
                 = step.notifyError
         }
 
-        this.registerRessetableInternal(adaptedSagaStep)
+        this.registerRunToCompletion(adaptedSagaStep)
     }
 
 
@@ -463,8 +552,8 @@ class SagaRegistration[TInitial, TStepPayload] extends
 }
 
 object SagaRoot {    
-    def makeRegistration[TInitial](): ResettableRegistration[TInitial, TInitial] = 
-        new SagaRegistration[TInitial, TInitial]()
+    def makeRegistration[TInitial <: Matchable](): ResettableRegistration[TInitial, TInitial] = 
+        new SagaRegistration[TInitial, TInitial](None)
 
 }
 
