@@ -11,6 +11,8 @@ import com.transactor.protocols.SagaSteps.sagaStepWithCompensation
 import com.transactor.protocols.SagaStepContract.PerformSagaStep
 import com.transactor.protocols.SagaSteps.sagaStep
 import akka.Done
+import java.util.UUID
+import com.transactor.protocols.StartSagaPipeline
 
 case class Step1Result(result1: String)
 
@@ -74,14 +76,44 @@ object SagaCompositionRoot {
             stepNotifyError = context.system.ignoreRef
           )
         )
-        .compile(context)
+        .compile()
 
-      compiledSaga.execute(
-        input = "Sample input",
-        notifyCompletion = context.spawnAnonymous(Behaviors.receive { (ctx, messsag) =>
+      compiledSaga match {
+        case Left(sagaPipeline) => {
+          val executionId = UUID.randomUUID()
+          val pipelineBehaviour = sagaPipeline.makePipelineBehaviour
+          val pipelineActorRef = context.spawn(pipelineBehaviour, s"SagaExecutionPipeline${executionId}")
+
+          
+          val sagaCompletionBehavious = Behaviors.receiveMessage[Option[Done]]{
+            message => message match {
+              case Some(value) => {
+                println("Saga execution completed")
+                Behaviors.stopped
+              }
+              case None => {
+                println("Saga execution failed")
+                Behaviors.stopped
+              }
+            }
+          }
+
+          val sagaCompletionHandler = context.spawn(sagaCompletionBehavious, s"SagaCompletionHandler${executionId}")
+
+          pipelineActorRef ! StartSagaPipeline(
+            "There is my start message",
+            Some(s"Execution${executionId}"),
+            sagaCompletionHandler
+          )
+
           Behaviors.same
-        })
-      )
+    
+        }
+        case Right(value) => {
+          context.log.error("Failed to create saga for the requested pipeline")
+          Behaviors.stopped
+        }
+      }
 
       Behaviors.same
     }
