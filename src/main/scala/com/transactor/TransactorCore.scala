@@ -279,7 +279,7 @@ class SagaRegistration[TInitial, TStepPayload <: Matchable]
         }
 
 
-        this.mergedBehaviour match {
+        val resultBehaviour = this.mergedBehaviour match {
             //On first iteration we always have TInitial = TStepPayload, so here we are
             //Will perform runtime casting
             case None => Behaviors.receive[StartInteractionExtrnal[TInitial, TStepResult]]{
@@ -304,7 +304,7 @@ class SagaRegistration[TInitial, TStepPayload <: Matchable]
                 }
             }
 
-            case Some(nestedMessageHandler) => Behaviors.receive[StartInteractionExtrnal[TInitial, TStepPayload]]{
+            case Some(nestedMessageHandler) => Behaviors.receive[StartInteractionExtrnal[TInitial, TStepResult]]{
                 (context, externalInteractionStartEvent) => {
                     val startInteractionExternalRef = context.spawnAnonymous(nestedMessageHandler)
 
@@ -320,21 +320,22 @@ class SagaRegistration[TInitial, TStepPayload <: Matchable]
                                         }
                                         case Some(value) => {
                                                 
-
                                             val stepBehaviour = context.spawnAnonymous(startupBehaviour)
-                                            val stepInteractionResultTranslator
-                                                = makeStepInteractionResultTranslator[TStepPayload, TStepKey](
+
+
+                                             val stepInteractionResultTranslator
+                                                = makeStepInteractionResultTranslator[TStepResult, TStepKey](
                                                     externalInteractionStartEvent.notifyResult
                                                 )
-                                            
-                                            
+
+                                            val transalationActor = context.spawnAnonymous(stepInteractionResultTranslator)                                            
+
                                             stepBehaviour ! StartInteraction[TStepResult, TStepKey](
                                                 sagaId = externalInteractionStartEvent.sagaId,
                                                 interactionPaylod = value,
-                                                notifyResult = null                                                
+                                                notifyResult = transalationActor                                                
                                             )
-
-
+                                            
                                             Behaviors.stopped
                                         }
                                     }
@@ -355,13 +356,14 @@ class SagaRegistration[TInitial, TStepPayload <: Matchable]
     
         }
 
-        throw new Exception("Error")
+        new SagaRegistration[TInitial, TStepResult](Some(resultBehaviour))
     }
     
 
     private def makeStepInteractionResultTranslator[TStepResult <: Matchable, TStepKey <: StepKeyBase](
         externalMessageNotificator: ActorRef[Option[TStepResult]]
     ): Behavior[NotifyStepInteractionResult[TStepResult, TStepKey]]
+        //I need to consider to implement notification more properly
         = Behaviors.receiveMessage[NotifyStepInteractionResult[TStepResult, TStepKey]]{
             message => {
                 message match {
