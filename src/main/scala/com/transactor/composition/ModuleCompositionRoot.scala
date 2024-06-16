@@ -28,7 +28,6 @@ case class WrappedThrowable[TException <: Throwable](ex: TException) extends Sag
 
 object SagaCompositionRoot {
 
-
   def sampleSaga: Behavior[StartProgram] = Behaviors.receive { (context, msg) =>
     {
       val FirstStepDescriptor  = StepDescriptor("First step")
@@ -80,13 +79,12 @@ object SagaCompositionRoot {
 
       compiledSaga match {
         case Left(sagaPipeline) => {
-          val executionId = UUID.randomUUID()
+          val executionId       = UUID.randomUUID()
           val pipelineBehaviour = sagaPipeline.makePipelineBehaviour
-          val pipelineActorRef = context.spawn(pipelineBehaviour, s"SagaExecutionPipeline${executionId}")
+          val pipelineActorRef  = context.spawn(pipelineBehaviour, s"SagaExecutionPipeline${executionId}")
 
-          
-          val sagaCompletionBehavious = Behaviors.receiveMessage[Option[Done]]{
-            message => message match {
+          val sagaCompletionBehavious = Behaviors.receiveMessage[Option[Done]] { message =>
+            message match {
               case Some(value) => {
                 println("Saga execution completed")
                 Behaviors.stopped
@@ -107,7 +105,7 @@ object SagaCompositionRoot {
           )
 
           Behaviors.same
-    
+
         }
         case Right(value) => {
           context.log.error("Failed to create saga for the requested pipeline")

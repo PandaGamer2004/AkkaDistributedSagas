@@ -23,7 +23,6 @@ import com.transactor.protocols.SagaSteps.sagaStepWithCompensation
 import com.transactor.protocols.SagaSteps.sagaStep
 import akka.NotUsed
 import scala.concurrent.java8.FuturesConvertersImpl.P
-import upickle.default
 import scala.language.implicitConversions
 import scala.util.Try
 import com.transactor.serialization.{SerDe, SerializedJson}

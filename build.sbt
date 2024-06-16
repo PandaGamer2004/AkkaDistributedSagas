@@ -5,26 +5,15 @@ lazy val akkaVersion = "2.9.3"
 lazy val coreDependencies = Seq(
   "com.typesafe.akka" %% "akka-actor-typed"         % akkaVersion,
   "ch.qos.logback"     % "logback-classic"          % "1.2.13",
-  "com.lihaoyi"       %% "upickle"                  % "3.3.1",
+  "io.getquill"       %% "quill-jdbc"               % "3.18.0",
+  "org.postgresql"     % "postgresql"               % "42.2.8",
   "com.typesafe.akka" %% "akka-actor-testkit-typed" % akkaVersion % Test,
   "org.scalatest"     %% "scalatest"                % "3.2.15"    % Test,
   "org.scalameta"     %% "munit"                    % "0.7.29"    % Test
 )
 
-lazy val printGitIgnore = taskKey[Unit]("A simple hello task")
-
 lazy val core = (project in file("."))
   .settings(
-    printGitIgnore := {
-      val log           = streams.value.log
-      val gitIgnoreFile = baseDirectory.value / ".gitignore"
-
-      if (gitIgnoreFile.exists()) {
-        val fileContent = IO.read(gitIgnoreFile)
-        log.info(s"Content of file ${gitIgnoreFile.name} ${fileContent}")
-      }
-
-    },
     version := "1.0",
     scalaVersion := "3.4.0",
     name := "sample-akka",
